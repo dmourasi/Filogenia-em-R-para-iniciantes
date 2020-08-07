@@ -22,3 +22,5 @@ tree <- rtree(n = 20)
 plot(tree, edge.width = 2)
 ```
 a função rtree irá gerar uma árvore aleátoria, onde n=20 indica o numero de taxons desejado. Na função plot irá reproduzir a árvore visualmente e com a opção edge.width é possível selecionar a largura das linhas.
+
+![image](https://user-images.githubusercontent.com/23074735/89691809-4a5b6900-d8e0-11ea-8218-423dafa12dc8.png)
