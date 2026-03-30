@@ -1,0 +1,1131 @@
+---
+title: "Filogenia em R para Iniciantes"
+author: "Olivier De Clerk (UGent) — atualizado por Daniel Moura"
+date: today
+lang: pt-BR
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-title: "Conteúdo"
+    number-sections: true
+    code-fold: false
+    code-tools: true
+    theme: cosmo
+    highlight-style: github
+    fig-align: center
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+# Introdução à Filogenética
+
+A **filogenética** é o estudo das relações evolutivas entre organismos. Uma **árvore filogenética** (ou filogenia) é uma representação gráfica dessas relações.
+
+Os componentes fundamentais de uma árvore filogenética são:
+
+| Componente | Descrição |
+|---|---|
+| **Folhas (tips/OTUs)** | Os táxons atuais: espécies, populações ou sequências |
+| **Nós internos** | Ancestrais comuns hipotéticos |
+| **Ramos (branches)** | Conectam nós; o comprimento pode representar tempo evolutivo ou número de mudanças |
+| **Raiz** | O ancestral comum mais antigo de todos os táxons analisados |
+
+## Árvores enraizadas vs. não-enraizadas
+
+Uma árvore **enraizada** possui um ponto de referência (a raiz), indicando a direção do tempo evolutivo. Uma árvore **não-enraizada** mostra apenas as relações entre os táxons sem indicar qual grupo é mais basal.
+
+Para enraizar uma árvore, geralmente usamos um **grupo externo (outgroup)** — um táxon sabidamente mais distante de todos os outros no estudo.
+
+## Principais métodos de inferência filogenética
+
+| Método | Critério de otimização | Pacote R |
+|---|---|---|
+| UPGMA / Neighbor-Joining | Distância genética | `ape` |
+| Máxima Parcimônia | Menor número de mudanças | `phangorn` |
+| Máxima Verossimilhança | Probabilidade dos dados dado o modelo | `phangorn` |
+| Inferência Bayesiana | Probabilidade posterior (Bayes + MCMC) | MrBayes, BEAST |
+
+Ao longo deste tutorial, vamos implementar cada um desses métodos passo a passo.
+
+---
+
+# Instalando os pacotes necessários
+
+::: {.callout-important}
+## Execute este bloco uma única vez por máquina
+A instalação só precisa ser feita uma vez. Nas sessões seguintes, basta carregar as bibliotecas com `library()`.
+:::
+
+O bloco abaixo mostra como instalar os pacotes manualmente, caso ainda não estejam disponíveis:
+
+```{r}
+#| eval: false
+#| label: instalacao-manual
+
+# Pacotes disponíveis no CRAN
+install.packages(c("ape", "phytools", "phangorn", "ggplot2", "nlme", "geiger"))
+
+# Pacotes do Bioconductor (repositório especializado em bioinformática)
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("ggtree")
+BiocManager::install("msa")
+```
+
+O chunk a seguir verifica automaticamente quais pacotes estão faltando e os instala antes de prosseguir — isso garante que o documento renderize em qualquer máquina:
+
+```{r}
+#| label: instalacao-auto
+#| output: false
+
+pacotes_cran <- c("ape", "phytools", "phangorn", "ggplot2", "nlme", "geiger")
+ausentes <- pacotes_cran[!sapply(pacotes_cran, requireNamespace, quietly = TRUE)]
+
+if (length(ausentes) > 0) {
+  message("Instalando pacotes ausentes: ", paste(ausentes, collapse = ", "))
+
+  # Remove arquivo de lock deixado por instalação anterior interrompida
+  lock_dir <- file.path(.libPaths()[1], "00LOCK")
+  if (dir.exists(lock_dir)) unlink(lock_dir, recursive = TRUE)
+
+  install.packages(ausentes,
+                   repos = "https://cloud.r-project.org",
+                   quiet = TRUE)
+}
+
+# ggtree (Bioconductor) — instalado apenas se ausente
+if (!requireNamespace("ggtree", quietly = TRUE)) {
+  if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager", repos = "https://cloud.r-project.org")
+  BiocManager::install("ggtree", ask = FALSE, quiet = TRUE)
+}
+```
+
+Agora carregamos os pacotes que serão usados ao longo do documento:
+
+```{r}
+#| label: carregar-pacotes
+
+library(ape)
+library(phytools)
+library(phangorn)
+library(ggplot2)
+```
+
+::: {.callout-note}
+## Sobre o `ape`
+O pacote `ape` (*Analyses of Phylogenetics and Evolution*) é o núcleo da filogenética em R. A maioria dos outros pacotes depende das estruturas de dados definidas nele.
+
+> Referência: Paradis, E. (2011). *Analysis of Phylogenetics and Evolution with R*. Springer.
+:::
+
+---
+
+# Árvores: estruturas básicas com `ape`
+
+## Simulando e visualizando uma árvore
+
+Vamos começar gerando uma árvore aleatória. Isso nos permite explorar a estrutura de dados sem precisar de sequências reais ainda.
+
+```{r}
+#| label: fig-arvore-aleatoria
+#| fig-cap: "Árvore filogenética aleatória com 20 táxons gerada por `rtree()`."
+#| fig-width: 6
+#| fig-height: 5
+
+set.seed(42)
+tree <- rtree(n = 20)
+plot(tree, edge.width = 2)
+```
+
+A função `rtree()` gera uma árvore aleatória com topologia e comprimentos de ramos sorteados. O argumento `n` define o número de táxons (folhas).
+
+## A estrutura interna de um objeto `phylo`
+
+Um objeto da classe `phylo` é uma **lista** com pelo menos 4 componentes. Para entender sua estrutura, vamos criar uma árvore pequena e simples a partir de texto no formato Newick:
+
+```{r}
+#| label: fig-cladograma-simples
+#| fig-cap: "Cladograma de 5 táxons criado a partir de uma string Newick."
+#| fig-width: 5
+#| fig-height: 4
+
+tree5 <- read.tree(text = "(((A,B),(C,D)),E);")
+plot(tree5, edge.width = 2, type = "cladogram", font = 4)
+```
+
+Agora podemos inspecionar cada componente da lista `phylo` separadamente:
+
+```{r}
+#| label: estrutura-edge
+
+# Matriz de arestas: cada linha é [nó_ancestral, nó_descendente]
+tree5$edge
+```
+
+Cada linha da matriz `edge` representa uma aresta (ramo) da árvore. A primeira coluna é o nó de origem, e a segunda é o nó de destino.
+
+```{r}
+#| label: estrutura-labels
+
+# Rótulos das folhas (na mesma ordem das pontas numeradas de 1 a n)
+tree5$tip.label
+
+# Número de nós internos
+tree5$Nnode
+```
+
+```{r}
+#| label: estrutura-edge-length
+
+# Comprimentos dos ramos (NULL pois não definimos nenhum)
+tree5$edge.length
+```
+
+::: {.callout-note}
+## Convenção de numeração do `ape`
+- **Pontas (folhas):** numeradas de `1` a `n`
+- **Nós internos:** numerados de `n+1` a `n+m`, onde `m = n-1` para árvores bifurcadas completas
+- **A raiz** é sempre o nó `n+1`
+:::
+
+Podemos visualizar essa numeração diretamente no gráfico:
+
+```{r}
+#| label: fig-numeracao-nos
+#| fig-cap: "Numeração das pontas (em azul) e dos nós internos (em amarelo) pelo `ape`."
+#| fig-width: 5
+#| fig-height: 4
+
+plot(tree5, type = "phylogram", edge.width = 2)
+tiplabels(bg = "lightblue",  cex = 0.8)
+nodelabels(bg = "lightyellow", cex = 0.8)
+```
+
+## Tipos de visualização disponíveis
+
+O `ape` oferece cinco tipos de layout para árvores filogenéticas:
+
+```{r}
+#| label: fig-tipos-layout
+#| fig-cap: "Cinco layouts disponíveis para visualização de árvores com `plot.phylo()`."
+#| fig-width: 10
+#| fig-height: 6
+
+set.seed(7)
+tree_vis <- rtree(15)
+
+par(mfrow = c(2, 3), mar = c(1, 1, 2, 1))
+plot(tree_vis, type = "phylogram", main = "phylogram", edge.width = 1.5)
+plot(tree_vis, type = "cladogram", main = "cladogram", edge.width = 1.5)
+plot(tree_vis, type = "fan",       main = "fan",       edge.width = 1.5)
+plot(tree_vis, type = "unrooted",  main = "unrooted",  edge.width = 1.5)
+plot(tree_vis, type = "radial",    main = "radial",    edge.width = 1.5)
+par(mfrow = c(1, 1), mar = c(5, 4, 4, 2))
+```
+
+::: {.callout-tip}
+## Qual layout usar?
+- **phylogram**: padrão, mostra comprimento dos ramos
+- **cladogram**: foco na topologia, sem comprimentos
+- **fan / radial**: para árvores grandes com muitos táxons
+- **unrooted**: quando a raiz ainda não foi determinada
+:::
+
+---
+
+# Formatos de arquivo: Newick e Nexus
+
+Antes de trabalhar com dados reais, é fundamental entender os dois formatos de arquivo mais comuns em filogenética.
+
+## Formato Newick
+
+O formato **Newick** (também chamado de *New Hampshire*) representa uma árvore como parênteses aninhados. É o formato mais simples e amplamente suportado.
+
+```
+# Árvore sem comprimentos de ramo
+(((A,B),(C,D)),E);
+
+# Árvore com comprimentos de ramo
+(((A:0.1,B:0.2):0.05,(C:0.3,D:0.15):0.08):0.12,E:0.4);
+
+# Árvore com valores de suporte nos nós e comprimentos de ramo
+(((A:0.1,B:0.2)90:0.05,(C:0.3,D:0.15)85:0.08)95:0.12,E:0.4);
+```
+
+A leitura de uma string Newick é feita diretamente com `read.tree()`:
+
+```{r}
+#| label: fig-newick-comprimentos
+#| fig-cap: "Árvore lida a partir de uma string Newick com comprimentos de ramo."
+#| fig-width: 5
+#| fig-height: 4
+
+tree_nwk <- read.tree(text = "(((A:0.1,B:0.2):0.05,(C:0.3,D:0.15):0.08):0.12,E:0.4);")
+
+plot(tree_nwk, edge.width = 2)
+add.scale.bar(cex = 0.8)
+```
+
+Para escrever uma árvore em formato Newick (como string ou arquivo):
+
+```{r}
+#| label: escrever-newick
+
+# Imprime a string Newick no console
+write.tree(tree_nwk)
+```
+
+```{r}
+#| eval: false
+#| label: salvar-newick
+
+# Salva em arquivo (não executado neste documento)
+write.tree(tree_nwk, "minha_arvore.nwk")
+```
+
+## Formato Nexus
+
+O formato **Nexus** é mais rico: permite armazenar árvores, alinhamentos, matrizes de caracteres e blocos de comandos para programas externos (MrBayes, PAUP*). Um arquivo Nexus tem esta estrutura:
+
+```
+#NEXUS
+
+BEGIN TAXA;
+    NTAX = 4;
+    TAXLABELS A B C D;
+END;
+
+BEGIN TREES;
+    TREE 1 = (((A:0.1,B:0.2):0.05,C:0.3):0.08,D:0.5);
+END;
+```
+
+Leitura e escrita em Nexus com o `ape`:
+
+```{r}
+#| eval: false
+#| label: nexus-io
+
+library(ape)
+
+# Lendo um arquivo Nexus
+tree <- read.nexus("minha_arvore.nex")
+
+# Escrevendo em Nexus
+write.nexus(tree, file = "minha_arvore.nex")
+
+# Visualizando o conteúdo do arquivo no console
+cat(readLines("minha_arvore.nex"), sep = "\n")
+```
+
+---
+
+# Manipulando árvores filogenéticas
+
+## Simulando árvores com o modelo birth-death
+
+Uma forma mais biologicamente realista de simular árvores é usar o modelo **birth-death**, que considera taxas de especiação (`b`) e extinção (`d`):
+
+```{r}
+#| label: fig-birthdeath
+#| fig-cap: "Árvore simulada com modelo birth-death (b=1, d=0.2, n=40). Os nós são identificados para as operações seguintes."
+#| fig-width: 6
+#| fig-height: 7
+
+set.seed(123)
+tree_bd <- pbtree(b = 1, d = 0.2, n = 40)
+plotTree(tree_bd, fsize = 0.6)
+nodelabels(cex = 0.5, bg = "lightyellow")
+```
+
+## Extraindo um clado
+
+Após identificar um nó de interesse (pelo número exibido com `nodelabels()`), podemos extrair o clado descendente:
+
+```{r}
+#| label: fig-extrai-clado
+#| fig-cap: "Clado extraído do nó 60 da árvore birth-death."
+#| fig-width: 5
+#| fig-height: 5
+
+clado <- extract.clade(tree_bd, node = 60)
+plotTree(clado, fsize = 0.7)
+```
+
+## Removendo pontas (pruning)
+
+```{r}
+#| label: fig-drop-tips
+#| fig-cap: "Árvore após remoção aleatória de 10 pontas com `drop.tip()`."
+#| fig-width: 6
+#| fig-height: 6
+
+set.seed(5)
+tips_remover <- sample(tree_bd$tip.label, 10)
+tree_podada  <- drop.tip(tree_bd, tips_remover)
+plotTree(tree_podada, fsize = 0.7)
+```
+
+## Enraizando, ladderizando e calculando distâncias
+
+```{r}
+#| label: fig-manipulacoes
+#| fig-cap: "Efeito do `ladderize()` na organização visual dos ramos da árvore."
+#| fig-width: 8
+#| fig-height: 5
+
+tree_ex <- read.tree(text = "((A,B),(C,(D,E)));")
+
+# Enraizando com outgroup
+tree_root <- root(tree_ex, outgroup = "A", resolve.root = TRUE)
+
+# Ladderizar organiza os ramos para melhor legibilidade
+tree_ladd <- ladderize(tree_root)
+
+par(mfrow = c(1, 2))
+plot(tree_root, main = "Sem ladderize", edge.width = 2)
+plot(tree_ladd, main = "Com ladderize", edge.width = 2)
+par(mfrow = c(1, 1))
+```
+
+```{r}
+#| label: mrca-distancias
+
+# Encontrando o ancestral comum mais recente (MRCA) de dois táxons
+getMRCA(tree_root, tip = c("C", "D"))
+
+# Calculando a matriz de distâncias patrísticas entre todas as pontas
+cophenetic(tree_root)
+```
+
+---
+
+# Alinhamento de sequências
+
+Na prática, a análise filogenética começa com **sequências de DNA, RNA ou proteínas**. Antes de inferir a filogenia, as sequências precisam ser **alinhadas** para identificar posições homólogas (posições que compartilham um ancestral evolutivo comum).
+
+::: {.callout-important}
+## Por que alinhar?
+Os métodos filogenéticos comparam posições homólogas entre sequências. Comparar a posição 10 de uma sequência com a posição 10 de outra só faz sentido se ambas descenderem da mesma posição ancestral. O alinhamento é o passo que garante isso.
+:::
+
+## Lendo sequências no formato FASTA
+
+```{r}
+#| eval: false
+#| label: ler-fasta
+
+library(ape)
+
+# Lendo sequências de DNA no formato FASTA
+seqs <- read.dna("minhas_sequencias.fasta", format = "fasta")
+
+# Inspecionando o objeto DNAbin
+class(seqs)     # "DNAbin"
+dim(seqs)       # número de sequências x comprimento
+rownames(seqs)  # nomes dos táxons
+```
+
+## Realizando o alinhamento múltiplo
+
+```{r}
+#| eval: false
+#| label: alinhamento
+
+library(msa)
+
+# Lendo sequências não-alinhadas
+seqs_raw <- readDNAStringSet("sequencias_nao_alinhadas.fasta")
+
+# Alinhamento com ClustalW
+aln_clustal <- msa(seqs_raw, method = "ClustalW")
+
+# Alinhamento com MUSCLE (geralmente mais preciso para sequências divergentes)
+aln_muscle  <- msa(seqs_raw, method = "Muscle")
+
+# Convertendo para o formato DNAbin (usado pelo ape e phangorn)
+aln_ape <- as.DNAbin(aln_muscle)
+```
+
+::: {.callout-tip}
+## ClustalW vs. MUSCLE vs. MAFFT
+- **ClustalW**: clássico, bom para sequências similares
+- **MUSCLE**: mais rápido e preciso para sequências mais divergentes
+- **MAFFT** (externo ao R): preferido para grandes datasets ou sequências muito divergentes
+:::
+
+## Convertendo para o formato `phyDat`
+
+O pacote `phangorn` usa o formato `phyDat` para armazenar dados de sequências. A partir daqui, usaremos o conjunto de dados `Laurasiatherian` embutido no `phangorn` para todos os exemplos seguintes — ele contém sequências de DNA de mamíferos placentários.
+
+```{r}
+#| label: carregar-primates
+
+library(phangorn)
+
+# Carregando o conjunto de dados de mamíferos placentários (phyDat)
+data("Laurasiatherian", package = "phangorn")
+
+# Laurasiatherian é um objeto phyDat já pronto para análise
+dados <- Laurasiatherian
+class(dados)
+print(dados)
+```
+
+---
+
+# Métodos baseados em distância: UPGMA e Neighbor-Joining
+
+Os métodos de distância transformam as sequências em uma **matriz de distâncias par-a-par** e depois reconstroem a árvore a partir dessa matriz. São os métodos mais rápidos computacionalmente.
+
+## Calculando a matriz de distâncias
+
+A matrix de distâncias é calculada sob um **modelo de substituição nucleotídica** que corrige o número bruto de diferenças para mutações múltiplas no mesmo sítio:
+
+```{r}
+#| label: matriz-distancias
+
+# Convertendo phyDat para DNAbin (necessário para dist.dna)
+aln <- as.DNAbin(dados)
+
+# Modelo de Jukes-Cantor (JC69): o mais simples
+dist_jc  <- dist.dna(aln, model = "JC69")
+
+# Modelo de Kimura 2-parâmetros (K80): transições ≠ transversões
+dist_k80 <- dist.dna(aln, model = "K80")
+
+# Visualizando a matriz de distâncias JC69
+round(as.matrix(dist_jc), 4)
+```
+
+## UPGMA
+
+O **UPGMA** (*Unweighted Pair Group Method with Arithmetic mean*) assume que todos os táxons evoluem na mesma taxa — o chamado **relógio molecular estrito**. Essa suposição raramente é válida em dados reais.
+
+```{r}
+#| label: fig-upgma
+#| fig-cap: "Árvore UPGMA a partir das distâncias JC69 dos mamíferos placentários. A escala de tempo é uniforme pois o UPGMA assume relógio molecular estrito."
+#| fig-width: 7
+#| fig-height: 5
+
+tree_upgma <- upgma(dist_jc)
+plot(tree_upgma, main = "UPGMA")
+add.scale.bar()
+```
+
+## Neighbor-Joining
+
+O **Neighbor-Joining (NJ)** não assume taxa igual de evolução entre linhagens, tornando-o muito mais robusto para dados reais. É o método de distância mais utilizado em filogenética.
+
+```{r}
+#| label: fig-nj
+#| fig-cap: "Árvore Neighbor-Joining a partir das distâncias JC69 dos mamíferos placentários. Observe a diferença nos comprimentos de ramo em relação ao UPGMA."
+#| fig-width: 7
+#| fig-height: 5
+
+tree_nj <- nj(dist_jc)
+plot(tree_nj, main = "Neighbor-Joining")
+add.scale.bar()
+```
+
+```{r}
+#| label: fig-comparacao-dist
+#| fig-cap: "Comparação direta entre UPGMA (esquerda) e Neighbor-Joining (direita) para os mesmos dados. Note que o UPGMA produz uma árvore ultramétrica (folhas niveladas), enquanto o NJ não."
+#| fig-width: 12
+#| fig-height: 5
+
+par(mfrow = c(1, 2))
+plot(tree_upgma, main = "UPGMA",             edge.width = 1.5)
+plot(tree_nj,    main = "Neighbor-Joining",  edge.width = 1.5)
+par(mfrow = c(1, 1))
+```
+
+::: {.callout-note}
+## Quando usar métodos de distância?
+- **Exploração inicial** dos dados antes de análises mais sofisticadas
+- **Datasets muito grandes** onde ML e Bayes são computacionalmente inviáveis
+- Como **árvore inicial** para otimização por ML ou parcimônia
+:::
+
+---
+
+# Máxima Parcimônia
+
+O critério de **Máxima Parcimônia (MP)** busca a árvore que requer o **menor número de mudanças evolutivas** para explicar os dados observados — o princípio da navalha de Occam aplicado à evolução.
+
+## Calculando o score de parcimônia
+
+Primeiro, vamos calcular o score de parcimônia de uma árvore inicial (NJ) e comparar com a árvore otimizada:
+
+```{r}
+#| label: parcimonia-score
+
+# Árvore inicial com NJ para usar como ponto de partida
+dist_ham   <- dist.hamming(dados)  # distância de Hamming (diferenças brutas)
+tree_start <- NJ(dist_ham)
+
+# Score de parcimônia da árvore NJ inicial
+cat("Score da árvore NJ:", parsimony(tree_start, dados), "\n")
+```
+
+## Busca pela árvore de Máxima Parcimônia
+
+```{r}
+#| label: parcimonia-optim
+#| cache: true
+
+# Busca local: rearranjos NNI (Nearest Neighbor Interchange)
+tree_mp_local <- optim.parsimony(tree_start, dados)
+cat("Score após otimização local:", parsimony(tree_mp_local, dados), "\n")
+
+# Busca mais robusta com pratchet (perturbação + otimização repetida)
+# Equivalente ao método de Ratchet de Nixon (1999)
+tree_mp <- pratchet(dados,
+                    start  = tree_start,
+                    maxit  = 100,
+                    minit  = 20,
+                    trace  = 0)
+
+# pratchet pode retornar múltiplas árvores (multiPhylo) quando há empate
+# nesse caso, calculamos o consenso estrito
+if (inherits(tree_mp, "multiPhylo")) {
+  tree_mp <- consensus(tree_mp, p = 0.5)
+}
+
+cat("Score após pratchet:", parsimony(tree_mp, dados), "\n")
+```
+
+```{r}
+#| label: fig-parcimonia
+#| fig-cap: "Árvore de Máxima Parcimônia dos mamíferos placentários após busca com o algoritmo pratchet. Árvores de parcimônia não possuem comprimentos de ramo — os ramos têm comprimento unitário."
+#| fig-width: 7
+#| fig-height: 5
+
+plot(tree_mp, main = "Máxima Parcimônia", edge.width = 1.5)
+```
+
+::: {.callout-warning}
+## Limitações da Parcimônia
+A parcimônia pode produzir resultados **inconsistentes** em casos de **atração de ramos longos** (*long-branch attraction*): quando dois táxons com ramos muito longos são agrupados juntos incorretamente, não por homologia, mas por convergência. Isso ocorre porque a parcimônia não usa um modelo explícito de substituição.
+:::
+
+---
+
+# Máxima Verossimilhança com `phangorn`
+
+A **Máxima Verossimilhança (ML)** é o **padrão ouro** entre os métodos não-Bayesianos. Ela busca a árvore — topologia e comprimentos de ramo — que **maximiza a probabilidade** de observar os dados dado um modelo explícito de substituição nucleotídica.
+
+## Seleção do modelo de substituição
+
+O primeiro passo é identificar o modelo que melhor descreve os dados usando critérios de informação:
+
+```{r}
+#| label: selecao-modelo
+#| cache: true
+
+tree_ini <- NJ(dist.hamming(dados))
+
+# Testando modelos e selecionando pelo AIC
+mt <- modelTest(dados, tree = tree_ini, model = "all", control = pml.control(trace = 0))
+
+# Mostrando os 10 melhores modelos
+head(mt[order(mt$AIC), c("Model", "logLik", "AIC", "BIC")], 10)
+```
+
+```{r}
+#| label: melhor-modelo
+
+melhor <- mt$Model[which.min(mt$AIC)]
+cat("Melhor modelo pelo AIC:", melhor, "\n")
+```
+
+Os principais modelos de substituição de DNA são:
+
+| Modelo | Parâmetros livres | Descrição |
+|---|---|---|
+| JC69 | 1 | Todas as taxas de substituição iguais |
+| K80 | 2 | Transições ≠ transversões |
+| HKY85 | 4 | Freqüências de base + ts ≠ tv |
+| GTR | 9 | Modelo mais geral reversível no tempo |
+| GTR+G | 10 | GTR + variação de taxa entre sítios (Gamma) |
+| GTR+G+I | 11 | GTR+G + proporção de sítios invariáveis |
+
+## Inferindo a árvore por ML
+
+```{r}
+#| label: ml-inferencia
+#| cache: true
+
+# Recriando tree_ini localmente para não depender do cache de selecao-modelo
+tree_ini <- NJ(dist.hamming(dados))
+
+# Criando o objeto pml com a árvore inicial e os dados
+fit_ini <- pml(tree_ini, dados)
+
+# Otimizando o modelo GTR+G+I (parâmetros do modelo + topologia)
+fit_ml <- optim.pml(fit_ini,
+                    model         = "GTR",
+                    optGamma      = TRUE,
+                    optInv        = TRUE,
+                    rearrangement = "stochastic",
+                    control       = pml.control(trace = 0))
+
+cat("Log-verossimilhança:", round(fit_ml$logLik, 2), "\n")
+cat("Parâmetro Gamma (alpha):", round(fit_ml$shape, 4), "\n")
+cat("Proporção de sítios invariáveis:", round(fit_ml$inv, 4), "\n")
+```
+
+```{r}
+#| label: fig-ml-arvore
+#| fig-cap: "Árvore de Máxima Verossimilhança (GTR+G+I) dos mamíferos placentários. Os comprimentos de ramo representam o número esperado de substituições por sítio."
+#| fig-width: 7
+#| fig-height: 5
+
+plot(fit_ml$tree,
+     main       = "Máxima Verossimilhança (GTR+G+I)",
+     edge.width = 2)
+add.scale.bar()
+```
+
+---
+
+# Suporte de Ramos: Bootstrap
+
+O **bootstrap não-paramétrico** é a medida de suporte mais usada em filogenética. O procedimento:
+
+1. Reamostrar as colunas do alinhamento **com reposição** para gerar um novo alinhamento do mesmo tamanho
+2. Inferir a árvore para esse novo alinhamento
+3. Repetir muitas vezes (geralmente 100–1000×)
+4. O **valor de bootstrap** de um ramo = % das réplicas em que aquele ramo aparece
+
+```{r}
+#| label: bootstrap
+#| cache: true
+
+# 100 réplicas (use 1000 para publicação)
+bs <- bootstrap.pml(fit_ml,
+                    bs      = 100,
+                    optNni  = TRUE,
+                    control = pml.control(trace = 0))
+```
+
+```{r}
+#| label: fig-bootstrap
+#| fig-cap: "Árvore ML com valores de bootstrap nos ramos. Valores ≥ 70% indicam suporte moderado; ≥ 90% indicam suporte robusto."
+#| fig-width: 7
+#| fig-height: 5
+
+tree_bs <- plotBS(fit_ml$tree,
+                  bs,
+                  type   = "phylogram",
+                  bs.col = "steelblue",
+                  p      = 50)   # mostra apenas valores ≥ 50%
+```
+
+::: {.callout-tip}
+## Interpretando valores de Bootstrap
+| Valor | Interpretação |
+|---|---|
+| ≥ 95% | Suporte muito forte |
+| 70–94% | Suporte moderado a forte |
+| 50–69% | Suporte fraco, resultado incerto |
+| < 50% | Sem suporte; ramo geralmente colapsado |
+:::
+
+---
+
+# Inferência Bayesiana
+
+A **Inferência Bayesiana (IB)** estima a **distribuição de probabilidade posterior** das topologias e parâmetros do modelo combinando a verossimilhança dos dados com um **prior** e amostrando via **MCMC** (Markov Chain Monte Carlo).
+
+## A equação de Bayes aplicada à filogenética
+
+$$P(\text{árvore} \mid \text{dados}) \propto \underbrace{P(\text{dados} \mid \text{árvore})}_{\text{verossimilhança}} \times \underbrace{P(\text{árvore})}_{\text{prior}}$$
+
+- **Verossimilhança** `P(dados | árvore)`: igual à usada em ML
+- **Prior** `P(árvore)`: conhecimento ou suposições anteriores (geralmente uniformes)
+- **Posterior** `P(árvore | dados)`: o que queremos — a probabilidade da árvore dados os dados
+
+O MCMC "caminha" pelo espaço de topologias e parâmetros, amostrando proporcionalmente à probabilidade posterior. Após o período de **burn-in** (aquecimento), a frequência com que cada topologia é visitada estima sua probabilidade posterior.
+
+## Preparando a análise no MrBayes
+
+**MrBayes** é o programa de IB mais popular para filogenética molecular. Ele roda externamente ao R, mas podemos preparar o arquivo de entrada pelo R:
+
+```{r}
+#| eval: false
+#| label: preparar-mrbayes
+
+library(ape)
+
+# 1. Salvar o alinhamento em formato Nexus
+write.nexus.data(as.DNAbin(dados), file = "analise_laurasiatherian.nex")
+
+# 2. Adicionar o bloco MrBayes ao final do arquivo .nex:
+bloco_mrbayes <- "
+BEGIN MRBAYES;
+  set autoclose=yes;
+  lset nst=6 rates=invgamma;    [modelo GTR+G+I]
+  mcmc ngen=1000000 samplefreq=500 printfreq=500;
+  sump burnin=500;
+  sumt burnin=500;
+END;
+"
+cat(bloco_mrbayes, file = "analise_laurasiatherian.nex", append = TRUE)
+```
+
+## Lendo os resultados do MrBayes no R
+
+```{r}
+#| eval: false
+#| label: fig-bayes-resultado
+
+library(ape)
+
+# Lendo a árvore consenso (arquivo .con.tre gerado pelo MrBayes)
+tree_bayes <- read.nexus("analise_laurasiatherian.nex.con.tre")
+
+plot(tree_bayes,
+     main       = "Inferência Bayesiana (MrBayes)",
+     edge.width = 2)
+
+# Valores nos nós = probabilidades posteriores (0 a 1)
+nodelabels(round(as.numeric(tree_bayes$node.label), 2), cex = 0.7)
+```
+
+::: {.callout-note}
+## BEAST2 para análises tempo-calibradas
+**BEAST2** é o padrão para **filogenias calibradas por tempo** (árvores com datas absolutas) e **filogeografia**. Ele usa fósseis ou taxas de mutação conhecidas como calibrações para estimar o tempo de divergência entre linhagens. Os resultados podem ser visualizados no R com os pacotes `treeio` e `ggtree`.
+:::
+
+---
+
+# Visualização Avançada de Árvores
+
+## Personalizando com `ape`
+
+O `ape` permite personalizar cores, espessuras e anotações diretamente:
+
+```{r}
+#| label: fig-ape-customizado
+#| fig-cap: "Árvore com cores por grupo, escala e rótulos de nós personalizados."
+#| fig-width: 7
+#| fig-height: 6
+
+set.seed(11)
+tree_viz <- rtree(20)
+tree_viz <- ladderize(tree_viz)
+
+# Definindo cores para as pontas (2 grupos)
+cores_pontas <- c(rep("firebrick", 10), rep("steelblue", 10))
+
+plot(tree_viz,
+     tip.color   = cores_pontas,
+     edge.width  = 2,
+     edge.color  = "gray40",
+     label.offset = 0.01,
+     cex         = 0.9,
+     main        = "Árvore com dois grupos")
+
+add.scale.bar(cex = 0.8)
+legend("topleft",
+       legend = c("Grupo A", "Grupo B"),
+       col    = c("firebrick", "steelblue"),
+       pch    = 19,
+       bty    = "n")
+```
+
+## Visualização com `ggtree`
+
+O pacote `ggtree` integra árvores filogenéticas à gramática do `ggplot2`, permitindo adicionar metadados com muito mais flexibilidade:
+
+```{r}
+#| label: fig-ggtree-basico
+#| fig-cap: "Árvore básica com `ggtree`, layout retangular e rótulos das pontas."
+#| fig-width: 7
+#| fig-height: 6
+
+if (!requireNamespace("ggtree", quietly = TRUE)) {
+  message("ggtree não encontrado — instale via BiocManager::install('ggtree')")
+  knitr::knit_exit()
+}
+library(ggtree)
+
+set.seed(22)
+tree_gg <- rtree(25)
+
+ggtree(tree_gg) +
+  geom_tiplab(size = 3) +
+  theme_tree2() +
+  labs(title = "Árvore básica com ggtree")
+```
+
+```{r}
+#| label: fig-ggtree-metadados
+#| fig-cap: "Árvore com metadados associados: cor por grupo ecológico e tamanho do ponto por valor numérico de uma característica."
+#| fig-width: 8
+#| fig-height: 7
+
+set.seed(33)
+tree_gg2 <- rtree(30)
+
+# Criando metadados associados às pontas
+metadados <- data.frame(
+  label  = tree_gg2$tip.label,
+  grupo  = sample(c("Floresta", "Cerrado", "Caatinga"), 30, replace = TRUE),
+  massa  = runif(30, 1, 100)
+)
+
+# Unindo metadados à árvore com %<+%
+ggtree(tree_gg2) %<+% metadados +
+  geom_tippoint(aes(color = grupo, size = massa), alpha = 0.8) +
+  geom_tiplab(aes(color = grupo), size = 2.5, hjust = -0.1) +
+  scale_color_manual(values = c("Floresta"  = "darkgreen",
+                                 "Cerrado"   = "goldenrod3",
+                                 "Caatinga"  = "sienna3")) +
+  scale_size(range = c(1, 5)) +
+  theme_tree2() +
+  labs(title  = "Distribuição de espécies por bioma",
+       color  = "Bioma",
+       size   = "Massa corporal (g)") +
+  theme(legend.position = "right")
+```
+
+```{r}
+#| label: fig-ggtree-circular
+#| fig-cap: "Layout circular do `ggtree`, ideal para árvores com muitos táxons."
+#| fig-width: 7
+#| fig-height: 7
+
+ggtree(tree_gg2, layout = "circular") %<+% metadados +
+  geom_tippoint(aes(color = grupo), size = 2) +
+  geom_tiplab(aes(color = grupo), size = 2) +
+  scale_color_manual(values = c("Floresta"  = "darkgreen",
+                                 "Cerrado"   = "goldenrod3",
+                                 "Caatinga"  = "sienna3")) +
+  theme_tree2() +
+  labs(color = "Bioma")
+```
+
+---
+
+# Reconstrução de Estados Ancestrais
+
+A **reconstrução de estados ancestrais** estima os valores de características fenotípicas ou moleculares nos nós ancestrais da árvore, permitindo inferir como os traços evoluíram ao longo do tempo.
+
+## Caracteres discretos
+
+Para caracteres com estados categóricos (ex: presença/ausência, cor, hábito de vida):
+
+```{r}
+#| label: fig-ancestral-discreto
+#| fig-cap: "Reconstrução de estados ancestrais para um caráter discreto (A/B) por Máxima Verossimilhança com o modelo Mk (Equal Rates). As tortas nos nós representam a probabilidade posterior de cada estado."
+#| fig-width: 7
+#| fig-height: 6
+
+set.seed(42)
+tree_anc <- pbtree(n = 40, scale = 1)
+
+# Simulando um caráter contínuo e transformando em discreto (A / B)
+x_cont <- fastBM(tree_anc, sig2 = 1)
+x_disc <- setNames(ifelse(x_cont > 0, "A", "B"), names(x_cont))
+
+# Reconstrução por ML com modelo Mk (Equal Rates) via ace() do pacote ape
+anc_ace <- ace(x_disc, tree_anc, type = "discrete", model = "ER")
+
+# Visualizando: árvore com tortas nos nós internos
+plot(tree_anc, type = "phylogram", edge.width = 1.5,
+     label.offset = 0.05, cex = 0.6)
+nodelabels(pie    = anc_ace$lik.anc,
+           piecol = c("firebrick", "steelblue"),
+           cex    = 0.5)
+legend("topleft",
+       legend = c("Estado A", "Estado B"),
+       fill   = c("firebrick", "steelblue"),
+       bty    = "n", cex = 0.8)
+title("Reconstrução Ancestral — Caráter Discreto (ML, Mk)")
+```
+
+## Caracteres contínuos
+
+Para características mensuráveis (tamanho corporal, temperatura, etc.), o modelo padrão é o **Movimento Browniano**:
+
+```{r}
+#| label: fig-ancestral-continuo-phenogram
+#| fig-cap: "Phenogram: projeção da árvore no espaço tempo × valor do caráter. Permite visualizar a trajetória evolutiva de uma característica contínua."
+#| fig-width: 8
+#| fig-height: 6
+
+set.seed(7)
+tree_cont <- pbtree(n = 35, scale = 1)
+x_cont2   <- fastBM(tree_cont, sig2 = 0.5)
+
+phenogram(tree_cont, x_cont2,
+          spread.labels = TRUE,
+          spread.cost   = c(1, 0),
+          fsize         = 0.6,
+          xlab          = "Tempo evolutivo",
+          ylab          = "Valor do caráter")
+```
+
+```{r}
+#| label: fig-contmap
+#| fig-cap: "ContMap: os ramos da árvore são coloridos de acordo com os estados ancestrais reconstruídos do caráter contínuo. Cores quentes = valores altos; cores frias = valores baixos."
+#| fig-width: 7
+#| fig-height: 7
+
+obj <- contMap(tree_cont, x_cont2, plot = FALSE)
+plot(obj,
+     fsize = c(0.6, 0.8),
+     leg.txt = "Valor do caráter")
+```
+
+---
+
+# Métodos Comparativos Filogenéticos
+
+Os **Métodos Comparativos Filogenéticos** (PCMs — *Phylogenetic Comparative Methods*) controlam a **não-independência estatística** entre espécies causada pelo compartilhamento de história evolutiva.
+
+::: {.callout-important}
+## Por que não podemos usar estatística clássica?
+Em uma análise clássica, cada espécie seria um ponto de dados independente. Mas espécies próximas tendem a ser similares simplesmente por serem aparentadas, violando o pressuposto de independência. Os PCMs incorporam a filogenia como estrutura de covariância.
+:::
+
+## Sinal filogenético
+
+O **sinal filogenético** mede o quanto um caráter segue o padrão esperado pela filogenia:
+
+```{r}
+#| label: sinal-filogenetico
+
+set.seed(99)
+tree_sig <- pbtree(n = 50, scale = 1)
+
+# Simulando um caráter com Movimento Browniano (sinal esperado = 1)
+x_sig <- fastBM(tree_sig)
+
+# K de Blomberg: K=1 → BM; K>1 → conservadorismo; K<1 → convergência
+k_result <- phylosig(tree_sig, x_sig,
+                     method = "K",
+                     test   = TRUE,
+                     nsim   = 999)
+print(k_result)
+```
+
+```{r}
+#| label: lambda-pagel
+
+# Lambda de Pagel: lambda=1 → BM puro; lambda=0 → sem sinal filogenético
+lambda_result <- phylosig(tree_sig, x_sig,
+                          method = "lambda",
+                          test   = TRUE)
+print(lambda_result)
+```
+
+## PGLS: Regressão com controle filogenético
+
+O **PGLS** (*Phylogenetic Generalized Least Squares*) é a versão filogenética da regressão linear. Ele modela a estrutura de covariância entre espécies explicitamente:
+
+```{r}
+#| label: pgls
+
+library(nlme)
+
+set.seed(55)
+tree_pgls <- rtree(50)
+
+# Simulando dois caracteres correlacionados evoluindo por BM
+x_pgls <- fastBM(tree_pgls)
+y_pgls <- x_pgls * 0.8 + fastBM(tree_pgls, sig2 = 0.3)
+
+# Estrutura de correlação filogenética (Movimento Browniano)
+cor_bm <- corBrownian(phy = tree_pgls)
+
+# PGLS
+dados_pgls  <- data.frame(y = y_pgls, x = x_pgls,
+                           row.names = tree_pgls$tip.label)
+modelo_pgls <- gls(y ~ x, correlation = cor_bm, data = dados_pgls)
+summary(modelo_pgls)
+```
+
+## Comparando modelos de evolução de caracteres
+
+Diferentes modelos de evolução representam diferentes processos macroevolutivos. Podemos compará-los pelo AIC:
+
+```{r}
+#| label: modelos-evolucao
+
+library(geiger)
+
+set.seed(12)
+tree_mod <- pbtree(n = 50, scale = 1)
+x_mod    <- fastBM(tree_mod)
+
+# Ajustando os três modelos principais
+fit_bm <- fitContinuous(tree_mod, x_mod, model = "BM")  # Deriva aleatória (neutro)
+fit_ou <- fitContinuous(tree_mod, x_mod, model = "OU")  # Seleção estabilizadora
+fit_eb <- fitContinuous(tree_mod, x_mod, model = "EB")  # Radiação adaptativa (Early Burst)
+
+# Comparando pelo AIC
+# fitContinuous retorna objetos da classe "gfit"; acessa-se o AIC via $opt$aic
+aic_tabela <- data.frame(
+  Modelo    = c("BM (deriva)", "OU (seleção estabilizadora)", "EB (radiação adaptativa)"),
+  AIC       = c(fit_bm$opt$aic, fit_ou$opt$aic, fit_eb$opt$aic),
+  Delta_AIC = NA
+)
+aic_tabela$Delta_AIC <- aic_tabela$AIC - min(aic_tabela$AIC)
+aic_tabela[order(aic_tabela$AIC), ]
+```
+
+::: {.callout-tip}
+## Interpretando os modelos de evolução
+| Modelo | Processo biológico | Sinal esperado |
+|---|---|---|
+| **BM** (Movimento Browniano) | Deriva genética, evolução neutra | K ≈ 1 |
+| **OU** (Ornstein-Uhlenbeck) | Seleção estabilizadora em torno de um ótimo | K < 1 |
+| **EB** (Early Burst) | Radiação adaptativa seguida de estase | Taxa de evolução diminui com o tempo |
+:::
+
+---
+
+# Referências e Leituras Adicionais
+
+## Livros
+
+- **Paradis, E. (2011).** *Analysis of Phylogenetics and Evolution with R* (2ª ed.). Springer. — Referência principal para o pacote `ape`.
+- **Felsenstein, J. (2004).** *Inferring Phylogenies*. Sinauer Associates. — Fundamentos teóricos clássicos.
+- **Yang, Z. (2014).** *Molecular Evolution: A Statistical Approach*. Oxford University Press. — Modelos de substituição e ML.
+- **Revell, L.J. & Harmon, L.G. (2022).** *Phylogenetic Comparative Methods in R*. Princeton University Press.
+
+## Tutoriais online
+
+- [CRAN Task View: Phylogenetics](https://cran.r-project.org/web/views/Phylogenetics.html)
+- [Phytools Blog (Liam Revell)](http://blog.phytools.org/)
+- [Documentação do ggtree](https://yulab-smu.top/treedata-book/)
+- [Tutorial do phangorn](https://cran.r-project.org/web/packages/phangorn/vignettes/Trees.html)
+- [Applied Phylogenetics Workshop (UC Davis)](http://treethinkers.org/)
+
+## Pacotes R utilizados neste tutorial
+
+| Pacote | Função principal |
+|---|---|
+| `ape` | Estruturas de dados e funções fundamentais |
+| `phytools` | Visualização, métodos comparativos, reconstrução ancestral |
+| `phangorn` | ML, parcimônia, seleção de modelos de substituição |
+| `ggtree` | Visualização avançada baseada em ggplot2 |
+| `geiger` | Modelos de diversificação e evolução de caracteres contínuos |
+| `nlme` | PGLS e modelos mistos |
+| `msa` | Alinhamento múltiplo de sequências |
+
+---
+
+::: {.callout-note}
+## Sobre este material
+Este documento foi desenvolvido para estudantes de graduação e pós-graduação em biologia, bioinformática e áreas correlatas. Sugestões e correções são bem-vindas via **Issues** no repositório do GitHub.
+:::
